@@ -1,0 +1,6 @@
+rootProject.name = 'banking-microservices-demo'
+
+include 'account-service'
+include 'transaction-service'
+include 'notification-service'
+include 'common'

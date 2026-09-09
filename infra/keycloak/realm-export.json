@@ -1,0 +1,80 @@
+{
+  "realm": "banking-demo",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "accessTokenLifespan": 3600,
+  "roles": {
+    "realm": [
+      { "name": "CUSTOMER", "description": "Khách hàng, chỉ thao tác trên tài khoản của chính mình" },
+      { "name": "TELLER", "description": "Giao dịch viên, xem được nhiều tài khoản" },
+      { "name": "ADMIN", "description": "Quản trị viên, toàn quyền" },
+      { "name": "SERVICE", "description": "Role dùng cho giao tiếp service-to-service (client credentials)" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "banking-api",
+      "name": "Banking API Client",
+      "enabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "secret": "banking-api-secret-dev-only",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": true,
+      "redirectUris": ["*"],
+      "webOrigins": ["*"]
+    },
+    {
+      "clientId": "transaction-service",
+      "name": "transaction-service (service-to-service)",
+      "enabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "secret": "transaction-service-secret-dev-only",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true
+    }
+  ],
+  "users": [
+    {
+      "username": "customer1",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "customer1@example.com",
+      "firstName": "Customer",
+      "lastName": "One",
+      "credentials": [{ "type": "password", "value": "customer123", "temporary": false }],
+      "realmRoles": ["CUSTOMER"]
+    },
+    {
+      "username": "teller1",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "teller1@example.com",
+      "firstName": "Teller",
+      "lastName": "One",
+      "credentials": [{ "type": "password", "value": "teller123", "temporary": false }],
+      "realmRoles": ["TELLER"]
+    },
+    {
+      "username": "admin1",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "admin1@example.com",
+      "firstName": "Admin",
+      "lastName": "One",
+      "credentials": [{ "type": "password", "value": "admin123", "temporary": false }],
+      "realmRoles": ["ADMIN"]
+    },
+    {
+      "username": "service-account-transaction-service",
+      "enabled": true,
+      "emailVerified": false,
+      "serviceAccountClientId": "transaction-service",
+      "realmRoles": ["SERVICE"]
+    }
+  ]
+}

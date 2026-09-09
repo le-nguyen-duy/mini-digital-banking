@@ -1,0 +1,28 @@
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      hints.enabled: true
+      # Collects logs from all containers in this docker-compose project.
+      # Since account/transaction/notification-service already log structured
+      # JSON (Logstash encoder), keys_under_root flattens fields like
+      # traceId/service/level directly into the Elasticsearch document.
+      templates:
+        - config:
+            - type: container
+              paths:
+                - /var/lib/docker/containers/${data.docker.container.id}/*.log
+              json.keys_under_root: true
+              json.add_error_key: true
+
+processors:
+  - add_docker_metadata: ~
+
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+  index: "banking-logs-%{+yyyy.MM.dd}"
+
+setup.template.name: "banking-logs"
+setup.template.pattern: "banking-logs-*"
+setup.ilm.enabled: false
+
+logging.level: info

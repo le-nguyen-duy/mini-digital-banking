@@ -1,0 +1,261 @@
+openapi: 3.0.3
+info:
+  title: Account Service API
+  description: >
+    Quản lý tài khoản khách hàng và số dư trong hệ thống
+    Digital Banking Microservices Platform.
+  version: 1.0.0
+  contact:
+    name: Duy Le
+
+servers:
+  - url: http://localhost:8081
+    description: Local (Docker Compose)
+  - url: http://account-service.banking-demo.svc.cluster.local
+    description: Internal (Kubernetes cluster)
+
+tags:
+  - name: Accounts
+    description: Quản lý tài khoản và số dư
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/v1/accounts:
+    post:
+      tags: [Accounts]
+      summary: Tạo tài khoản mới
+      security:
+        - bearerAuth: [ADMIN, TELLER]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAccountRequest'
+      responses:
+        '201':
+          description: Tạo tài khoản thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/accounts/{accountId}:
+    get:
+      tags: [Accounts]
+      summary: Tra cứu thông tin tài khoản theo ID
+      description: >
+        CUSTOMER chỉ được tra cứu tài khoản gắn với chính mình
+        (kiểm tra bổ sung trong service layer, không chỉ dựa vào role).
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: Thông tin tài khoản
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+
+  /api/v1/accounts/{accountId}/balance:
+    get:
+      tags: [Accounts]
+      summary: Tra cứu số dư tài khoản
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+      responses:
+        '200':
+          description: Số dư hiện tại
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BalanceResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+
+    patch:
+      tags: [Accounts]
+      summary: Cập nhật số dư (được gọi nội bộ bởi transaction-service)
+      description: >
+        Endpoint nội bộ, chỉ transaction-service (client credentials) được phép gọi.
+        Idempotent theo header `X-Transaction-Id`.
+      parameters:
+        - $ref: '#/components/parameters/AccountIdPath'
+        - name: X-Transaction-Id
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Dùng để đảm bảo idempotency khi request bị retry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateBalanceRequest'
+      responses:
+        '200':
+          description: Cập nhật số dư thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BalanceResponse'
+        '409':
+          description: Số dư không đủ hoặc tài khoản không hoạt động
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+
+  /actuator/health:
+    get:
+      tags: [Accounts]
+      summary: Health check (dùng cho Kubernetes liveness/readiness probe)
+      security: []
+      responses:
+        '200':
+          description: Service khoẻ mạnh
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Access token (JWT) do Keycloak phát hành. Role được đọc từ
+        claim `realm_access.roles` (CUSTOMER, TELLER, ADMIN).
+
+  parameters:
+    AccountIdPath:
+      name: accountId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    CreateAccountRequest:
+      type: object
+      required: [ownerUserId, initialBalance]
+      properties:
+        ownerUserId:
+          type: string
+          description: sub (user id) từ Keycloak token của chủ tài khoản
+        initialBalance:
+          type: number
+          format: decimal
+          minimum: 0
+          example: 1000000
+
+    AccountResponse:
+      type: object
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        accountNumber:
+          type: string
+          example: "0123456789"
+        ownerUserId:
+          type: string
+        balance:
+          type: number
+          format: decimal
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE, LOCKED]
+        createdAt:
+          type: string
+          format: date-time
+
+    BalanceResponse:
+      type: object
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        balance:
+          type: number
+          format: decimal
+        updatedAt:
+          type: string
+          format: date-time
+
+    UpdateBalanceRequest:
+      type: object
+      required: [amount, operation]
+      properties:
+        amount:
+          type: number
+          format: decimal
+          minimum: 0.01
+        operation:
+          type: string
+          enum: [DEBIT, CREDIT]
+        transactionId:
+          type: string
+          format: uuid
+
+    ErrorResponse:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        traceId:
+          type: string
+        errorCode:
+          type: string
+          example: ACC_NOT_FOUND
+        message:
+          type: string
+        path:
+          type: string
+
+  responses:
+    BadRequest:
+      description: Dữ liệu đầu vào không hợp lệ
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Token không hợp lệ hoặc hết hạn (AUTH_INVALID_TOKEN)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Không có quyền thao tác trên tài khoản này (AUTH_FORBIDDEN_RESOURCE)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    AccountNotFound:
+      description: Không tìm thấy tài khoản (ACC_NOT_FOUND)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'

@@ -1,0 +1,298 @@
+version: "3.9"
+
+# =========================================================================
+# Digital Banking Microservices Platform — Docker Compose (local/dev)
+# Chạy: docker compose up -d --build
+# =========================================================================
+
+networks:
+  banking-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  vault-data:
+  es-data:
+
+services:
+
+  # ----------------------------------------------------------------------
+  # DATABASE — 1 PostgreSQL instance, 3 database riêng (database-per-service)
+  # ----------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init-multiple-db.sh:/docker-entrypoint-initdb.d/init-multiple-db.sh
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - banking-net
+
+  # ----------------------------------------------------------------------
+  # IDENTITY — Keycloak (OAuth2 / OIDC Provider)
+  # ----------------------------------------------------------------------
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    container_name: keycloak
+    restart: unless-stopped
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./infra/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json
+    networks:
+      - banking-net
+
+  # ----------------------------------------------------------------------
+  # MESSAGING — Kafka (KRaft mode, không cần Zookeeper)
+  # Dùng image chính thức apache/kafka (bitnami/kafka:3.7 đã bị gỡ khỏi
+  # Docker Hub - Bitnami rotate/xoá tag cũ định kỳ, xem
+  # https://hub.docker.com/r/bitnami/kafka/tags). apache/kafka dùng tiền tố
+  # biến môi trường KAFKA_ (không phải KAFKA_CFG_ như Bitnami).
+  # ----------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: kafka
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: 0
+      KAFKA_PROCESS_ROLES: controller,broker
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - banking-net
+
+  # Kafka UI để xem topic/message trực quan khi demo (không bắt buộc, rất tiện)
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    restart: unless-stopped
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    ports:
+      - "8090:8080"
+    depends_on:
+      - kafka
+    networks:
+      - banking-net
+
+  # ----------------------------------------------------------------------
+  # SECRET MANAGEMENT — Vault (dev mode, KHÔNG dùng cấu hình này cho production)
+  # ----------------------------------------------------------------------
+  vault:
+    image: hashicorp/vault:1.17
+    container_name: vault
+    restart: unless-stopped
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root-token-dev-only
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    ports:
+      - "8200:8200"
+    volumes:
+      - vault-data:/vault/data
+    networks:
+      - banking-net
+
+  # ----------------------------------------------------------------------
+  # OBSERVABILITY — Elasticsearch + Kibana (thu thập & trực quan hoá log)
+  # ----------------------------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
+    container_name: elasticsearch
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks:
+      - banking-net
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.14.3
+    container_name: kibana
+    restart: unless-stopped
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+    networks:
+      - banking-net
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.14.3
+    container_name: filebeat
+    restart: unless-stopped
+    user: root
+    volumes:
+      - ./infra/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - elasticsearch
+    networks:
+      - banking-net
+
+  # ----------------------------------------------------------------------
+  # BUSINESS SERVICES
+  # ----------------------------------------------------------------------
+  account-service:
+    build:
+      context: .
+      dockerfile: account-service/Dockerfile
+      args:
+        HTTP_PROXY_HOST: ${DOCKER_BUILD_PROXY_HOST:-}
+        HTTP_PROXY_PORT: ${DOCKER_BUILD_PROXY_PORT:-}
+    container_name: account-service
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/account_db
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      # Token lấy từ localhost:8080 có iss=localhost; service trong Docker fetch JWKS qua keycloak:8080
+      KEYCLOAK_ISSUER_URI: http://localhost:8080/realms/banking-demo
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/banking-demo/protocol/openid-connect/certs
+      VAULT_URI: http://vault:8200
+      VAULT_TOKEN: root-token-dev-only
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      vault:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+    networks:
+      - banking-net
+
+  transaction-service:
+    build:
+      context: .
+      dockerfile: transaction-service/Dockerfile
+      args:
+        HTTP_PROXY_HOST: ${DOCKER_BUILD_PROXY_HOST:-}
+        HTTP_PROXY_PORT: ${DOCKER_BUILD_PROXY_PORT:-}
+    container_name: transaction-service
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/transaction_db
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KEYCLOAK_ISSUER_URI: http://localhost:8080/realms/banking-demo
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/banking-demo/protocol/openid-connect/certs
+      VAULT_URI: http://vault:8200
+      VAULT_TOKEN: root-token-dev-only
+      ACCOUNT_SERVICE_URL: http://account-service:8081
+      # Resilience4j (có thể override thêm trong application.yml của service)
+      RESILIENCE4J_CIRCUITBREAKER_INSTANCES_ACCOUNTSERVICE_FAILURERATETHRESHOLD: "50"
+      RESILIENCE4J_RATELIMITER_INSTANCES_TRANSACTIONAPI_LIMITFORPERIOD: "20"
+    ports:
+      - "8082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      account-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8082/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+    networks:
+      - banking-net
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: notification-service/Dockerfile
+      args:
+        HTTP_PROXY_HOST: ${DOCKER_BUILD_PROXY_HOST:-}
+        HTTP_PROXY_PORT: ${DOCKER_BUILD_PROXY_PORT:-}
+    container_name: notification-service
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/notification_db
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KEYCLOAK_ISSUER_URI: http://localhost:8080/realms/banking-demo
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/banking-demo/protocol/openid-connect/certs
+      VAULT_URI: http://vault:8200
+      VAULT_TOKEN: root-token-dev-only
+    ports:
+      - "8083:8083"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8083/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+    networks:
+      - banking-net
+
+# =========================================================================
+# GHI CHÚ:
+# 1. Tạo file ./infra/postgres/init-multiple-db.sh để tự tạo 3 database:
+#      account_db, transaction_db, notification_db khi container postgres khởi động lần đầu.
+# 2. Export realm Keycloak (banking-demo) ra ./infra/keycloak/realm-export.json
+#    để tự động import roles (CUSTOMER/TELLER/ADMIN) và client (banking-api).
+# 3. Cấu hình ./infra/filebeat/filebeat.yml để đọc log JSON từ container
+#    và đẩy vào Elasticsearch (index pattern: banking-logs-*).
+# 4. Vault ở đây chạy dev mode (in-memory, mất dữ liệu khi restart) — chỉ dùng cho local demo.
+#    Production cần Vault chạy HA mode với storage backend riêng (Consul/Raft).
+# =========================================================================

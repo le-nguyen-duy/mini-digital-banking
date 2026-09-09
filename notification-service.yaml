@@ -1,0 +1,190 @@
+openapi: 3.0.3
+info:
+  title: Notification Service API
+  description: >
+    Consume sự kiện giao dịch từ Kafka (`transaction.completed`, `transaction.failed`)
+    và ghi nhận thông báo gửi cho khách hàng (giả lập email/SMS bằng log + bản ghi DB).
+    Service này không expose API nghiệp vụ cho client cuối, chỉ có API tra cứu nội bộ
+    phục vụ admin/hỗ trợ và mục đích demo/kiểm tra.
+  version: 1.0.0
+  contact:
+    name: Duy Le
+
+servers:
+  - url: http://localhost:8083
+    description: Local (Docker Compose)
+  - url: http://notification-service.banking-demo.svc.cluster.local
+    description: Internal (Kubernetes cluster)
+
+tags:
+  - name: Notifications
+    description: Tra cứu thông báo đã gửi (phục vụ admin/hỗ trợ)
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/v1/notifications:
+    get:
+      tags: [Notifications]
+      summary: Tra cứu danh sách thông báo theo giao dịch hoặc khách hàng
+      description: Chỉ role ADMIN hoặc TELLER được phép truy vấn.
+      parameters:
+        - name: transactionId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: customerId
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: size
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Danh sách thông báo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationPageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/notifications/{notificationId}:
+    get:
+      tags: [Notifications]
+      summary: Tra cứu chi tiết một thông báo
+      parameters:
+        - name: notificationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Chi tiết thông báo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Không tìm thấy thông báo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /actuator/health:
+    get:
+      tags: [Notifications]
+      summary: Health check (dùng cho Kubernetes liveness/readiness probe)
+      security: []
+      responses:
+        '200':
+          description: Service khoẻ mạnh
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token (JWT) do Keycloak phát hành.
+
+  schemas:
+    NotificationResponse:
+      type: object
+      properties:
+        notificationId:
+          type: string
+          format: uuid
+        transactionId:
+          type: string
+          format: uuid
+        customerId:
+          type: string
+        channel:
+          type: string
+          enum: [EMAIL, SMS]
+        status:
+          type: string
+          enum: [SENT, FAILED]
+        message:
+          type: string
+        sentAt:
+          type: string
+          format: date-time
+
+    NotificationPageResponse:
+      type: object
+      properties:
+        content:
+          type: array
+          items:
+            $ref: '#/components/schemas/NotificationResponse'
+        page:
+          type: integer
+        size:
+          type: integer
+        totalElements:
+          type: integer
+        totalPages:
+          type: integer
+
+    ErrorResponse:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        traceId:
+          type: string
+        errorCode:
+          type: string
+        message:
+          type: string
+        path:
+          type: string
+
+  responses:
+    Unauthorized:
+      description: Token không hợp lệ hoặc hết hạn (AUTH_INVALID_TOKEN)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Không có quyền truy cập (AUTH_FORBIDDEN_RESOURCE) — chỉ ADMIN/TELLER
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+x-kafka-consumers:
+  description: >
+    Ngoài REST API ở trên, service này chủ yếu hoạt động như một Kafka consumer.
+    Phần dưới đây mô tả các topic được lắng nghe (không thuộc chuẩn OpenAPI,
+    chỉ ghi chú thêm cho tài liệu kỹ thuật).
+  topics:
+    - name: transaction.completed
+      groupId: notification-service-group
+      action: Ghi nhận thông báo thành công, giả lập gửi email/SMS
+    - name: transaction.failed
+      groupId: notification-service-group
+      action: Ghi nhận thông báo lỗi giao dịch cho khách hàng
